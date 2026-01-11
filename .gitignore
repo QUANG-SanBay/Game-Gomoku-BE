@@ -1,0 +1,9 @@
+/myworld
+/*.log
+__pycache__/
+*.py[cod]
+*.sqlite3
+/staticfiles/
+/media/
+.env
+venv/
