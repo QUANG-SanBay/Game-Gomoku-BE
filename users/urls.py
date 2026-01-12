@@ -4,7 +4,6 @@ from .views import (
     LoginView,
     LogoutView,
     MeView,
-    ProfileView,
     RefreshTokenView,
     RegisterView,
 )
@@ -15,5 +14,4 @@ urlpatterns = [
     path("logout/", LogoutView.as_view(), name="logout"),
     path("refresh/", RefreshTokenView.as_view(), name="token_refresh"),
     path("me/", MeView.as_view(), name="me"),
-    path("profile/", ProfileView.as_view(), name="profile"),
 ]

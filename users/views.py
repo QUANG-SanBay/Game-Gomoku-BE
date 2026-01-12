@@ -4,9 +4,13 @@ from rest_framework.views import APIView
 from rest_framework_simplejwt.serializers import TokenRefreshSerializer
 from rest_framework_simplejwt.tokens import RefreshToken
 
+from .models import CustomUser
 from .serializers import (
+	LeaderboardSerializer,
 	LoginSerializer,
 	ProfileSerializer,
+	ProfileUpdateSerializer,
+	PublicProfileSerializer,
 	RegisterSerializer,
 	UserMeSerializer,
 )
@@ -79,3 +83,35 @@ class ProfileView(APIView):
 	def get(self, request):
 		data = ProfileSerializer(request.user).data
 		return Response(data, status=status.HTTP_200_OK)
+
+
+class LeaderboardView(APIView):
+	permission_classes = [permissions.AllowAny]
+
+	def get(self, request):
+		users = CustomUser.objects.order_by("-elo", "-wins")[:10]
+		data = LeaderboardSerializer(users, many=True).data
+		return Response(data, status=status.HTTP_200_OK)
+
+
+class PublicProfileView(APIView):
+	permission_classes = [permissions.AllowAny]
+
+	def get(self, request, pk):
+		try:
+			user = CustomUser.objects.get(pk=pk)
+		except CustomUser.DoesNotExist:
+			return Response({"detail": "Không tìm thấy người dùng."}, status=status.HTTP_404_NOT_FOUND)
+		data = PublicProfileSerializer(user).data
+		return Response(data, status=status.HTTP_200_OK)
+
+
+class ProfileUpdateView(APIView):
+	permission_classes = [permissions.IsAuthenticated]
+
+	def put(self, request):
+		serializer = ProfileUpdateSerializer(request.user, data=request.data, partial=True)
+		if serializer.is_valid():
+			serializer.save()
+			return Response(ProfileSerializer(request.user).data, status=status.HTTP_200_OK)
+		return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)

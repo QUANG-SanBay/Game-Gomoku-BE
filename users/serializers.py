@@ -61,3 +61,26 @@ class ProfileSerializer(serializers.ModelSerializer):
     class Meta:
         model = CustomUser
         fields = ["id", "full_name", "username", "email", "wins", "losses", "elo"]
+
+
+class LeaderboardSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = CustomUser
+        fields = ["username", "elo", "wins"]
+
+
+class PublicProfileSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = CustomUser
+        fields = ["username", "elo", "wins", "losses", "draws", "avatar", "full_name"]
+
+
+class ProfileUpdateSerializer(serializers.ModelSerializer):
+    first_name = serializers.CharField(source="full_name", required=False)
+
+    class Meta:
+        model = CustomUser
+        fields = ["first_name", "avatar"]
+        extra_kwargs = {
+            "avatar": {"required": False, "allow_null": True},
+        }
