@@ -58,9 +58,20 @@ class UserMeSerializer(serializers.ModelSerializer):
 
 
 class ProfileSerializer(serializers.ModelSerializer):
+    avatar = serializers.SerializerMethodField()
+
     class Meta:
         model = CustomUser
-        fields = ["id", "full_name", "username", "email", "wins", "losses", "elo"]
+        fields = ["id", "full_name", "username", "email", "wins", "losses", "draws", "elo", "avatar"]
+
+    def get_avatar(self, obj):
+        request = self.context.get("request") if hasattr(self, "context") else None
+        if obj.avatar:
+            url = obj.avatar.url
+            if request:
+                return request.build_absolute_uri(url)
+            return url
+        return None
 
 
 class LeaderboardSerializer(serializers.ModelSerializer):
@@ -70,17 +81,34 @@ class LeaderboardSerializer(serializers.ModelSerializer):
 
 
 class PublicProfileSerializer(serializers.ModelSerializer):
+    avatar = serializers.SerializerMethodField()
+
     class Meta:
         model = CustomUser
         fields = ["username", "elo", "wins", "losses", "draws", "avatar", "full_name"]
 
+    def get_avatar(self, obj):
+        request = self.context.get("request") if hasattr(self, "context") else None
+        if obj.avatar:
+            url = obj.avatar.url
+            if request:
+                return request.build_absolute_uri(url)
+            return url
+        return None
+
 
 class ProfileUpdateSerializer(serializers.ModelSerializer):
-    first_name = serializers.CharField(source="full_name", required=False)
-
     class Meta:
         model = CustomUser
-        fields = ["first_name", "avatar"]
+        fields = ["full_name", "email", "avatar"]
         extra_kwargs = {
+            "full_name": {"required": False},
+            "email": {"required": False},
             "avatar": {"required": False, "allow_null": True},
         }
+
+    def validate_email(self, value):
+        user = self.instance
+        if value and CustomUser.objects.exclude(pk=user.pk).filter(email=value).exists():
+            raise serializers.ValidationError("Email đã được sử dụng.")
+        return value
