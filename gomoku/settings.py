@@ -145,3 +145,8 @@ SIMPLE_JWT = {
    'BLACKLIST_AFTER_ROTATION': True,
     'ACCESS_TOKEN_LIFETIME': timedelta(hours=1),
 }
+
+CORS_ALLOWED_ORIGINS = [
+    "http://localhost:5173",
+    "http://127.0.01:5173",
+]

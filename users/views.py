@@ -89,7 +89,7 @@ class LeaderboardView(APIView):
 	permission_classes = [permissions.AllowAny]
 
 	def get(self, request):
-		users = CustomUser.objects.order_by("-elo", "-wins")[:10]
+		users = CustomUser.objects.order_by("-elo", "-wins")[:20]
 		data = LeaderboardSerializer(users, many=True).data
 		return Response(data, status=status.HTTP_200_OK)
 
