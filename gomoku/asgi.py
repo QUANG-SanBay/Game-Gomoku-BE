@@ -8,9 +8,21 @@ https://docs.djangoproject.com/en/5.2/howto/deployment/asgi/
 """
 
 import os
-
-from django.core.asgi import get_asgi_application
+import django
 
 os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'gomoku.settings')
+django.setup()
 
-application = get_asgi_application()
+from django.core.asgi import get_asgi_application
+from .socketio_app import sio
+import socketio
+
+# Tạo Django ASGI application
+django_asgi_app = get_asgi_application()
+
+# Kết hợp Socket.IO với Django
+application = socketio.ASGIApp(
+    sio,
+    django_asgi_app,
+    socketio_path='socket.io'
+)
