@@ -18,12 +18,14 @@ class RoomSerializer(serializers.ModelSerializer):
             "host_name",
             "player_2_name",
             "status",
+            "board_size",
             "current_players",
             "has_password",
             "password",
         ]
         extra_kwargs = {
             "password": {"write_only": True, "required": False, "allow_null": True, "allow_blank": True},
+            "board_size": {"required": False},
         }
 
     def create(self, validated_data):

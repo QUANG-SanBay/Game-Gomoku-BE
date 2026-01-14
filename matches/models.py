@@ -9,6 +9,10 @@ class Room(models.Model):
         WAITING = "waiting", "Đang chờ"
         PLAYING = "playing", "Đang chơi"
         FULL = "full", "Đầy phòng"
+    
+    class BoardSize(models.IntegerChoices):
+        SMALL = 15, "15x15"
+        LARGE = 19, "19x19"
 
     room_name = models.CharField(max_length=100)
     host = models.ForeignKey(
@@ -26,6 +30,7 @@ class Room(models.Model):
     )
 
     password = models.CharField(max_length=50, null=True, blank=True)
+    board_size = models.IntegerField(choices=BoardSize.choices, default=BoardSize.SMALL)
     status = models.CharField(max_length=20, choices=Status.choices, default=Status.WAITING)
     created_at = models.DateTimeField(auto_now_add=True)
 
@@ -70,8 +75,11 @@ class Match(models.Model):
         related_name='won_matches'
     )
     
-    # JSONField lưu tọa độ các nước đi: [[0,0], [1,1], ...]
+    room = models.ForeignKey(Room, on_delete=models.SET_NULL, null=True, blank=True, related_name='matches')
+    board_size = models.IntegerField(default=15)
+    # JSONField lưu tọa độ các nước đi: [[row, col, player], ...] player: 'X' hoặc 'O'
     board_state = models.JSONField(default=list, verbose_name="Trạng thái bàn cờ")
+    current_turn = models.CharField(max_length=1, default='X')  # 'X' hoặc 'O'
     
     start_time = models.DateTimeField(auto_now_add=True, verbose_name="Thời gian bắt đầu")
     end_time = models.DateTimeField(null=True, blank=True, verbose_name="Thời gian kết thúc")

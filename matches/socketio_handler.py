@@ -1,7 +1,8 @@
 import socketio
 from django.contrib.auth import get_user_model
+from django.utils import timezone
 from rest_framework_simplejwt.tokens import AccessToken
-from .models import Room
+from .models import Match, Room
 
 User = get_user_model()
 
@@ -16,6 +17,7 @@ sio = socketio.AsyncServer(
 # Dictionary lưu mapping user_id -> sid và room_id -> [sid1, sid2]
 connected_users = {}  # {user_id: sid}
 room_sessions = {}    # {room_id: [sid1, sid2]}
+game_states = {}      # {room_id: {'board': [[]], 'current_turn': 'X', 'match_id': int}}
 
 
 def authenticate_user(token: str):
@@ -136,7 +138,9 @@ async def join_room(sid, data):
             await sio.emit('joined_room', {
                 'room_id': room_id,
                 'role': 'host',
+                'player_symbol': 'X',
                 'room_name': room.room_name,
+                'board_size': room.board_size,
                 'status': room.status,
                 'player_count': room.current_players
             }, room=sid)
@@ -149,6 +153,27 @@ async def join_room(sid, data):
             if sid not in room_sessions[room_id]:
                 room_sessions[room_id].append(sid)
             
+            # Khởi tạo game state khi đủ 2 người
+            if room_id not in game_states:
+                # Tạo Match trong DB
+                match = await Match.objects.acreate(
+                    player_x=room.host,
+                    player_o=room.player_2,
+                    room=room,
+                    board_size=room.board_size,
+                    current_turn='X'
+                )
+                
+                # Tạo bàn cờ trống
+                size = room.board_size
+                board = [[None for _ in range(size)] for _ in range(size)]
+                game_states[room_id] = {
+                    'board': board,
+                    'current_turn': 'X',
+                    'match_id': match.id,
+                    'board_size': size
+                }
+            
             # Thông báo cho cả phòng
             await sio.emit('player_joined', {
                 'username': room.player_2.username,
@@ -158,10 +183,19 @@ async def join_room(sid, data):
             await sio.emit('joined_room', {
                 'room_id': room_id,
                 'role': 'player_2',
+                'player_symbol': 'O',
                 'room_name': room.room_name,
+                'board_size': room.board_size,
                 'opponent': room.host.username,
                 'status': room.status
             }, room=sid)
+            
+            # Thông báo game bắt đầu
+            await sio.emit('game_start', {
+                'current_turn': 'X',
+                'board_size': room.board_size,
+                'match_id': game_states[room_id]['match_id']
+            }, room=f"room_{room_id}")
         else:
             await sio.emit('error', {'message': 'Bạn không ở trong phòng này'}, room=sid)
             
@@ -217,14 +251,117 @@ async def leave_room(sid, data):
 @sio.event
 async def make_move(sid, data):
     """Xử lý khi người chơi đánh cờ."""
-    room_id = data.get('room_id')
-    position = data.get('position')  # [row, col]
+    from .game_logic import check_winner, is_board_full, validate_move
     
-    # Broadcast nước đi cho cả phòng
-    await sio.emit('move_made', {
-        'position': position,
-        'timestamp': data.get('timestamp')
-    }, room=f"room_{room_id}", skip_sid=sid)
+    room_id = data.get('room_id')
+    row = data.get('row')
+    col = data.get('col')
+    
+    if room_id not in game_states:
+        await sio.emit('error', {'message': 'Game chưa bắt đầu'}, room=sid)
+        return
+    
+    # Tìm user
+    user_id = None
+    for uid, s in connected_users.items():
+        if s == sid:
+            user_id = uid
+            break
+    
+    if not user_id:
+        await sio.emit('error', {'message': 'Unauthorized'}, room=sid)
+        return
+    
+    try:
+        room = await Room.objects.select_related('host', 'player_2').aget(id=room_id)
+        game = game_states[room_id]
+        
+        # Xác định player symbol
+        if room.host_id == user_id:
+            player_symbol = 'X'
+        elif room.player_2_id == user_id:
+            player_symbol = 'O'
+        else:
+            await sio.emit('error', {'message': 'Bạn không ở trong phòng này'}, room=sid)
+            return
+        
+        # Kiểm tra lượt
+        if game['current_turn'] != player_symbol:
+            await sio.emit('error', {'message': 'Chưa đến lượt của bạn'}, room=sid)
+            return
+        
+        # Validate move
+        if not validate_move(game['board'], row, col):
+            await sio.emit('error', {'message': 'Nước đi không hợp lệ'}, room=sid)
+            return
+        
+        # Thực hiện nước đi
+        game['board'][row][col] = player_symbol
+        
+        # Kiểm tra thắng
+        winner = None
+        game_over = False
+        
+        if check_winner(game['board'], row, col, player_symbol):
+            winner = player_symbol
+            game_over = True
+        elif is_board_full(game['board']):
+            game_over = True  # Hòa
+        
+        # Chuyển lượt
+        game['current_turn'] = 'O' if player_symbol == 'X' else 'X'
+        
+        # Broadcast nước đi
+        await sio.emit('move_made', {
+            'row': row,
+            'col': col,
+            'player': player_symbol,
+            'current_turn': game['current_turn']
+        }, room=f"room_{room_id}")
+        
+        # Xử lý kết thúc game
+        if game_over:
+            match = await Match.objects.aget(id=game['match_id'])
+            match.board_state = [[game['board'][r][c] for c in range(game['board_size'])] for r in range(game['board_size'])]
+            match.end_time = timezone.now()
+            
+            if winner:
+                match.winner = room.host if winner == 'X' else room.player_2
+                # Cập nhật ELO/stats
+                winner_user = await User.objects.aget(id=match.winner_id)
+                loser_user = await User.objects.aget(id=(room.player_2_id if winner == 'X' else room.host_id))
+                
+                winner_user.wins += 1
+                winner_user.elo += 20
+                loser_user.losses += 1
+                loser_user.elo = max(0, loser_user.elo - 20)
+                
+                await winner_user.asave(update_fields=['wins', 'elo'])
+                await loser_user.asave(update_fields=['losses', 'elo'])
+            else:
+                # Hòa
+                host_user = await User.objects.aget(id=room.host_id)
+                player2_user = await User.objects.aget(id=room.player_2_id)
+                host_user.draws += 1
+                player2_user.draws += 1
+                await host_user.asave(update_fields=['draws'])
+                await player2_user.asave(update_fields=['draws'])
+            
+            await match.asave()
+            
+            await sio.emit('game_over', {
+                'winner': winner,
+                'result': 'win' if winner else 'draw',
+                'match_id': match.id
+            }, room=f"room_{room_id}")
+            
+            # Dọn dẹp
+            del game_states[room_id]
+            room.status = Room.Status.FULL
+            await room.asave(update_fields=['status'])
+            
+    except (Room.DoesNotExist, Match.DoesNotExist):
+        await sio.emit('error', {'message': 'Lỗi hệ thống'}, room=sid)
 
 
 @sio.event
