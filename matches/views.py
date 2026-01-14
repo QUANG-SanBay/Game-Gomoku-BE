@@ -17,6 +17,17 @@ class RoomListCreateView(APIView):
 		return Response(serializer.data, status=status.HTTP_200_OK)
 
 	def post(self, request):
+		# Kiểm tra xem user đã có phòng nào đang tồn tại chưa
+		existing_room = Room.objects.filter(
+			host=request.user
+		).exclude(status=Room.Status.FULL).first()
+		
+		if existing_room:
+			return Response({
+				"detail": "Bạn đã có phòng đang tồn tại. Vui lòng rời phòng trước khi tạo phòng mới.",
+				"existing_room_id": existing_room.id
+			}, status=status.HTTP_400_BAD_REQUEST)
+		
 		serializer = RoomSerializer(data=request.data, context={"request": request})
 		if serializer.is_valid():
 			room = serializer.save()
