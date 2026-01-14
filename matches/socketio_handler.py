@@ -1,7 +1,7 @@
 import socketio
 from django.contrib.auth import get_user_model
 from rest_framework_simplejwt.tokens import AccessToken
-from matches.models import Room
+from .models import Room
 
 User = get_user_model()
 

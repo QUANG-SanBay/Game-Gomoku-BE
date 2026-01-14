@@ -14,7 +14,7 @@ os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'gomoku.settings')
 django.setup()
 
 from django.core.asgi import get_asgi_application
-from .socketio_app import sio
+from matches.socketio_handler import sio
 import socketio
 
 # Tạo Django ASGI application
