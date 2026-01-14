@@ -321,6 +321,8 @@ async def make_move(sid, data):
         
         # Xử lý kết thúc game
         if game_over:
+            from .elo_calculator import calculate_elo_change, calculate_elo_draw
+            
             match = await Match.objects.aget(id=game['match_id'])
             match.board_state = [[game['board'][r][c] for c in range(game['board_size'])] for r in range(game['board_size'])]
             match.end_time = timezone.now()
@@ -331,10 +333,13 @@ async def make_move(sid, data):
                 winner_user = await User.objects.aget(id=match.winner_id)
                 loser_user = await User.objects.aget(id=(room.player_2_id if winner == 'X' else room.host_id))
                 
+                # Tính toán ELO change dựa trên công thức chuẩn
+                winner_change, loser_change = calculate_elo_change(winner_user.elo, loser_user.elo)
+                
                 winner_user.wins += 1
-                winner_user.elo += 20
+                winner_user.elo += winner_change
                 loser_user.losses += 1
-                loser_user.elo = max(0, loser_user.elo - 20)
+                loser_user.elo = max(0, loser_user.elo + loser_change)  # loser_change là số âm
                 
                 await winner_user.asave(update_fields=['wins', 'elo'])
                 await loser_user.asave(update_fields=['losses', 'elo'])
@@ -342,10 +347,17 @@ async def make_move(sid, data):
                 # Hòa
                 host_user = await User.objects.aget(id=room.host_id)
                 player2_user = await User.objects.aget(id=room.player_2_id)
+                
+                # Tính toán ELO change cho trường hợp hòa
+                host_change, player2_change = calculate_elo_draw(host_user.elo, player2_user.elo)
+                
                 host_user.draws += 1
+                host_user.elo += host_change
                 player2_user.draws += 1
-                await host_user.asave(update_fields=['draws'])
-                await player2_user.asave(update_fields=['draws'])
+                player2_user.elo += player2_change
+                
+                await host_user.asave(update_fields=['draws', 'elo'])
+                await player2_user.asave(update_fields=['draws', 'elo'])
             
             await match.asave()
             
