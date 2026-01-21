@@ -77,7 +77,7 @@ class ProfileSerializer(serializers.ModelSerializer):
 class LeaderboardSerializer(serializers.ModelSerializer):
     class Meta:
         model = CustomUser
-        fields = ["username", "elo", "wins"]
+        fields = ["id", "full_name", "elo", "wins", "losses", "draws"]
 
 
 class PublicProfileSerializer(serializers.ModelSerializer):

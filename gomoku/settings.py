@@ -41,6 +41,7 @@ INSTALLED_APPS = [
     'rest_framework',
     'rest_framework.authtoken', # Token cơ bản
     'rest_framework_simplejwt.token_blacklist',
+    'corsheaders', # Thêm corsheaders
     'djoser',
     'users', # App chứa CustomUser
     'matches',
@@ -49,6 +50,7 @@ INSTALLED_APPS = [
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
+    'corsheaders.middleware.CorsMiddleware', # Thêm CorsMiddleware
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
@@ -143,10 +145,17 @@ REST_FRAMEWORK = {
 SIMPLE_JWT = {
    'AUTH_HEADER_TYPES': ('Bearer',), # Khớp với spec "Authorization: Bearer <token>" của bạn
    'BLACKLIST_AFTER_ROTATION': True,
-    'ACCESS_TOKEN_LIFETIME': timedelta(hours=1),
+    'ACCESS_TOKEN_LIFETIME': timedelta(hours=8),
 }
 
+# Cấu hình CORS
 CORS_ALLOWED_ORIGINS = [
-    "http://localhost:5173",
-    "http://127.0.01:5173",
+    "http://localhost:5173", # Cho phép origin của Vite/React
+    "http://127.0.0.1:5173",
 ]
+
+# Hoặc cho phép tất cả các origin (chỉ dùng cho môi trường development)
+# CORS_ALLOW_ALL_ORIGINS = True
+
+# Cho phép gửi cookie/credentials
+CORS_ALLOW_CREDENTIALS = True

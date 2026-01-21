@@ -1,6 +1,8 @@
+import asyncio
 import socketio
 from django.contrib.auth import get_user_model
 from django.utils import timezone
+from asgiref.sync import sync_to_async
 from rest_framework_simplejwt.tokens import AccessToken
 from .models import Match, Room
 
@@ -18,32 +20,100 @@ sio = socketio.AsyncServer(
 connected_users = {}  # {user_id: sid}
 room_sessions = {}    # {room_id: [sid1, sid2]}
 game_states = {}      # {room_id: {'board': [[]], 'current_turn': 'X', 'match_id': int}}
+disconnect_timers = {}  # {room_id: asyncio.Task}
 
 
-def authenticate_user(token: str):
-    """Xác thực JWT token và trả về user."""
+async def authenticate_user(token: str):
+    """Xác thực JWT token và trả về user (an toàn trong async)."""
     try:
         access_token = AccessToken(token)
         user_id = access_token['user_id']
-        user = User.objects.get(id=user_id)
+        user = await sync_to_async(User.objects.get)(id=user_id)
         return user
-    except Exception:
+    except Exception as e:
+        print(f"❌ Token authentication error: {e}")
         return None
+
+
+async def cancel_disconnect_timer(room_id: int):
+    task = disconnect_timers.get(room_id)
+    if task and not task.done():
+        task.cancel()
+    disconnect_timers.pop(room_id, None)
+
+
+async def award_forfeit(room, game, loser_symbol: str):
+    """Declare forfeit for the disconnected player after grace period."""
+    await cancel_disconnect_timer(room.id)
+
+    winner_symbol = 'O' if loser_symbol == 'X' else 'X'
+    winner_user = room.player_2 if winner_symbol == 'O' else room.host
+    loser_user = room.host if winner_symbol == 'O' else room.player_2
+
+    match = await Match.objects.aget(id=game['match_id'])
+    match.winner = winner_user
+    match.board_state = [[game['board'][r][c] for c in range(game['board_size'])] for r in range(game['board_size'])]
+    match.end_time = timezone.now()
+
+    from .elo_calculator import calculate_elo_change
+    w_change, l_change = calculate_elo_change(winner_user.elo, loser_user.elo)
+
+    winner_user.wins += 1
+    winner_user.elo += w_change
+    loser_user.losses += 1
+    loser_user.elo = max(0, loser_user.elo + l_change)
+
+    await winner_user.asave(update_fields=['wins', 'elo'])
+    await loser_user.asave(update_fields=['losses', 'elo'])
+    await match.asave()
+
+    payload = {
+        'message': 'Game Over - Opponent disconnected too long',
+        'winner': {
+            'id': winner_user.id,
+            'full_name': winner_user.get_full_name() or winner_user.username,
+            'symbol': winner_symbol
+        },
+        'winner_symbol': winner_symbol,
+        'elo_changes': {
+            'player_x': {
+                'old_elo': room.host.elo,
+                'new_elo': winner_symbol == 'X' and winner_user.elo or room.host.elo + l_change,
+                'change': w_change if winner_symbol == 'X' else l_change
+            },
+            'player_o': {
+                'old_elo': room.player_2.elo,
+                'new_elo': winner_symbol == 'O' and winner_user.elo or room.player_2.elo + l_change,
+                'change': w_change if winner_symbol == 'O' else l_change
+            }
+        }
+    }
+
+    await sio.emit('game_over', payload, room=f"room_{room.id}")
+    game_states.pop(room.id, None)
+    room.status = Room.Status.FULL
+    await room.asave(update_fields=['status'])
 
 
 @sio.event
 async def connect(sid, environ, auth):
     """Xử lý khi client kết nối."""
+    print(f"🔌 Connection attempt - SID: {sid}")
+    print(f"   Auth data: {auth}")
+    
     token = auth.get('token') if auth else None
     if not token:
+        print(f"❌ No token provided")
         return False  # Từ chối kết nối
     
-    user = authenticate_user(token)
+    print(f"🔑 Token received: {token[:50]}...")
+    user = await authenticate_user(token)
     if not user:
+        print(f"❌ Authentication failed")
         return False
     
     connected_users[user.id] = sid
-    print(f"User {user.username} (ID: {user.id}) connected with SID: {sid}")
+    print(f"✅ User {user.username} (ID: {user.id}) connected with SID: {sid}")
     return True
 
 
@@ -67,35 +137,34 @@ async def disconnect(sid):
         
         if room_id:
             try:
-                room = await Room.objects.aget(id=room_id)
-                
-                # Nếu host rời
-                if room.host_id == user_id:
-                    # Thông báo cho player_2 (nếu có)
-                    if room.player_2_id and room.player_2_id in connected_users:
-                        await sio.emit('room_closed', {
-                            'message': 'Chủ phòng đã thoát'
-                        }, room=connected_users[room.player_2_id])
-                    
-                    # Xóa phòng
-                    await room.adelete()
-                    print(f"Đã xóa phòng {room_id} vì host thoát.")
-                
-                # Nếu player_2 rời
-                elif room.player_2_id == user_id:
-                    room.player_2 = None
-                    room.status = Room.Status.WAITING
-                    await room.asave(update_fields=['player_2', 'status'])
-                    
-                    # Thông báo cho host
-                    if room.host_id in connected_users:
+                room = await Room.objects.select_related('host', 'player_2').aget(id=room_id)
+                game = game_states.get(room_id)
+
+                if room.host_id == user_id or room.player_2_id == user_id:
+                    # Grace period for reconnect: 30s
+                    async def schedule_forfeit():
+                        await asyncio.sleep(30)
+                        # If player didn't return, award forfeit
+                        if room_id in game_states and game:
+                            loser_symbol = 'X' if room.host_id == user_id else 'O'
+                            await award_forfeit(room, game, loser_symbol)
+
+                    # cancel any existing timer then start new
+                    await cancel_disconnect_timer(room_id)
+                    disconnect_timers[room_id] = asyncio.create_task(schedule_forfeit())
+
+                    # Notify opponent that player left
+                    opponent_sid = None
+                    if room.host_id == user_id and room.player_2_id in connected_users:
+                        opponent_sid = connected_users[room.player_2_id]
+                    if room.player_2_id == user_id and room.host_id in connected_users:
+                        opponent_sid = connected_users[room.host_id]
+                    if opponent_sid:
                         await sio.emit('player_left', {
-                            'message': 'Đối thủ đã thoát'
-                        }, room=connected_users[room.host_id])
-                    
-                    print(f"Phòng {room_id} đã trở về trạng thái chờ.")
-                
-                # Dọn session
+                            'message': 'Đối thủ đã mất kết nối, chờ 30s để quay lại'
+                        }, room=opponent_sid)
+
+                # Dọn session mapping
                 if room_id in room_sessions:
                     room_sessions[room_id] = [s for s in room_sessions[room_id] if s != sid]
                     if not room_sessions[room_id]:
@@ -127,6 +196,9 @@ async def join_room(sid, data):
     try:
         room = await Room.objects.select_related('host', 'player_2').aget(id=room_id)
         
+        # Hủy timer nếu reconnect vào cùng phòng
+        await cancel_disconnect_timer(room_id)
+
         # Nếu là host
         if room.host_id == user_id:
             await sio.enter_room(sid, f"room_{room_id}")
@@ -142,7 +214,10 @@ async def join_room(sid, data):
                 'room_name': room.room_name,
                 'board_size': room.board_size,
                 'status': room.status,
-                'player_count': room.current_players
+                'player_count': room.current_players,
+                'board_state': game_states.get(room_id, {}).get('board'),
+                'current_turn': game_states.get(room_id, {}).get('current_turn'),
+                'match_id': game_states.get(room_id, {}).get('match_id')
             }, room=sid)
         
         # Nếu là player_2
@@ -187,12 +262,25 @@ async def join_room(sid, data):
                 'room_name': room.room_name,
                 'board_size': room.board_size,
                 'opponent': room.host.username,
-                'status': room.status
+                'status': room.status,
+                'board_state': game_states.get(room_id, {}).get('board'),
+                'current_turn': game_states.get(room_id, {}).get('current_turn'),
+                'match_id': game_states.get(room_id, {}).get('match_id')
             }, room=sid)
+
+            # Gửi sync_state cho người vừa vào nếu game đang chơi
+            if room_id in game_states:
+                gs = game_states[room_id]
+                await sio.emit('sync_state', {
+                    'board_state': gs.get('board'),
+                    'current_turn': gs.get('current_turn'),
+                    'match_id': gs.get('match_id'),
+                    'board_size': gs.get('board_size')
+                }, room=sid)
             
             # Thông báo game bắt đầu
             await sio.emit('game_start', {
-                'current_turn': 'X',
+                'current_turn': game_states[room_id]['current_turn'],
                 'board_size': room.board_size,
                 'match_id': game_states[room_id]['match_id']
             }, room=f"room_{room_id}")
@@ -222,22 +310,17 @@ async def leave_room(sid, data):
     
     # Xử lý logic tương tự disconnect
     try:
-        room = await Room.objects.aget(id=room_id)
-        
-        if room.host_id == user_id:
-            await sio.emit('room_closed', {
-                'message': 'Chủ phòng đã thoát'
-            }, room=f"room_{room_id}")
-            await room.adelete()
-        
-        elif room.player_2_id == user_id:
-            room.player_2 = None
-            room.status = Room.Status.WAITING
-            await room.asave(update_fields=['player_2', 'status'])
-            
-            await sio.emit('player_left', {
-                'message': 'Đối thủ đã thoát'
-            }, room=f"room_{room_id}")
+        room = await Room.objects.select_related('host', 'player_2').aget(id=room_id)
+        game = game_states.get(room_id)
+
+        if room.host_id == user_id or room.player_2_id == user_id:
+            loser_symbol = 'X' if room.host_id == user_id else 'O'
+            if game:
+                await award_forfeit(room, game, loser_symbol)
+            else:
+                await sio.emit('player_left', {
+                    'message': 'Đối thủ đã thoát'
+                }, room=f"room_{room_id}")
         
         if room_id in room_sessions:
             room_sessions[room_id] = [s for s in room_sessions[room_id] if s != sid]
@@ -256,6 +339,7 @@ async def make_move(sid, data):
     room_id = data.get('room_id')
     row = data.get('row')
     col = data.get('col')
+    incoming_match_id = data.get('match_id')
     
     if room_id not in game_states:
         await sio.emit('error', {'message': 'Game chưa bắt đầu'}, room=sid)
@@ -275,6 +359,11 @@ async def make_move(sid, data):
     try:
         room = await Room.objects.select_related('host', 'player_2').aget(id=room_id)
         game = game_states[room_id]
+
+        # Nếu client gửi match_id, đảm bảo đang đánh trong ván hiện tại
+        if incoming_match_id and game.get('match_id') and incoming_match_id != game['match_id']:
+            await sio.emit('error', {'message': 'Ván đấu đã thay đổi, hãy tải lại'}, room=sid)
+            return
         
         # Xác định player symbol
         if room.host_id == user_id:

@@ -17,16 +17,26 @@ class RoomListCreateView(APIView):
 		return Response(serializer.data, status=status.HTTP_200_OK)
 
 	def post(self, request):
-		# Kiểm tra xem user đã có phòng nào đang tồn tại chưa
+		# Dọn dẹp các phòng stale trước khi kiểm tra
+		Room.prune_stale()
+		
+		# Kiểm tra xem user đã có phòng nào đang chờ (waiting)
 		existing_room = Room.objects.filter(
-			host=request.user
-		).exclude(status=Room.Status.FULL).first()
+			host=request.user,
+			status=Room.Status.WAITING
+		).first()
 		
 		if existing_room:
-			return Response({
-				"detail": "Bạn đã có phòng đang tồn tại. Vui lòng rời phòng trước khi tạo phòng mới.",
-				"existing_room_id": existing_room.id
-			}, status=status.HTTP_400_BAD_REQUEST)
+			# Kiểm tra xem phòng này có thực sự tồn tại không (double-check)
+			try:
+				existing_room.refresh_from_db()
+				return Response({
+					"detail": "Bạn đã có phòng đang chờ. Vui lòng rời phòng trước khi tạo phòng mới.",
+					"existing_room_id": existing_room.id
+				}, status=status.HTTP_400_BAD_REQUEST)
+			except Room.DoesNotExist:
+				# Phòng đã bị xóa, cho phép tạo phòng mới
+				pass
 		
 		serializer = RoomSerializer(data=request.data, context={"request": request})
 		if serializer.is_valid():
@@ -73,27 +83,39 @@ class RoomLeaveView(APIView):
 
 	def post(self, request):
 		room_id = request.data.get("room_id")
-		try:
-			room = Room.objects.get(id=room_id)
-		except Room.DoesNotExist:
-			return Response({"detail": "Room không tồn tại."}, status=status.HTTP_404_NOT_FOUND)
-
 		user = request.user
+		
+		# Nếu không có room_id, tự động tìm phòng của user
+		if not room_id:
+			# Tìm phòng mà user là host hoặc player_2
+			room = Room.objects.filter(
+				Q(host=user) | Q(player_2=user),
+				status__in=[Room.Status.WAITING, Room.Status.PLAYING]
+			).first()
+			
+			if not room:
+				return Response({"detail": "Bạn không có phòng nào để rời."}, status=status.HTTP_404_NOT_FOUND)
+		else:
+			try:
+				room = Room.objects.get(id=room_id)
+			except Room.DoesNotExist:
+				return Response({"detail": "Room không tồn tại."}, status=status.HTTP_404_NOT_FOUND)
 
 		if room.host_id == user.id:
 			room.delete()
-			return Response({"detail": "Phòng đã bị xóa do host rời."}, status=status.HTTP_200_OK)
+			return Response({"detail": "Phòng đã bị xóa do host rời.", "room_id": room.id}, status=status.HTTP_200_OK)
 
 		if room.player_2_id == user.id:
+			room_id_backup = room.id
 			room.player_2 = None
 			room.status = Room.Status.WAITING
 			room.save(update_fields=["player_2", "status"])
-			return Response({"detail": "Bạn đã rời phòng."}, status=status.HTTP_200_OK)
+			return Response({"detail": "Bạn đã rời phòng.", "room_id": room_id_backup}, status=status.HTTP_200_OK)
 
 		# Nếu vì lý do nào đó không còn người chơi nào, dọn phòng zombie
 		if room.current_players == 0:
 			room.delete()
-			return Response({"detail": "Phòng đã bị xóa."}, status=status.HTTP_200_OK)
+			return Response({"detail": "Phòng đã bị xóa.", "room_id": room.id}, status=status.HTTP_200_OK)
 
 		return Response({"detail": "Bạn không ở trong phòng này."}, status=status.HTTP_400_BAD_REQUEST)
 
